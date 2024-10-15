@@ -450,6 +450,8 @@ void os_start_process(int process_id, char* process_name){
 
         int encontrado = 0;
 
+        fread(&estado, 1, 1, memory_file);
+
         // Leemos el ID del proceso (1 byte)
         fread(&pid, 1, 1, memory_file);
 
@@ -472,12 +474,6 @@ void os_start_process(int process_id, char* process_name){
             estado = 0x01;
             fwrite(&estado, 1, 1, memory_file);
 
-            //Regresamos el cursor al lugar en que se encontraba
-            fseek(memory_file, 12, SEEK_CUR);
-
-            //Creo que al incorporarlo aca va a saltar el resto en caso de encontrarlo y luego toma el break, pero parece que no es necesaria
-            //fseek(memory_file, 256 - 12, SEEK_CUR);
-
             break;
         }
 
@@ -493,15 +489,14 @@ void os_start_process(int process_id, char* process_name){
             unsigned char pid;
             // Leer el estado del proceso (1 byte)
             fread(&estado, 1, 1, memory_file);
-
             // Leer el ID del proceso (1 byte)
             fread(&pid, 1, 1, memory_file);
 
-            //Asumiendo que el process id es NULL si el espacio está libre
+            //Asumiendo que el process id es 0 si el espacio está libre
             if (pid == 0){
 
                 //Devolvemos el cursor
-                fseek(memory_file,-(2 + 1), SEEK_CUR);
+                fseek(memory_file,-(2), SEEK_CUR);
                 
                 estado = 0x01;
                 fwrite(&estado, 1, 1, memory_file);
@@ -515,12 +510,13 @@ void os_start_process(int process_id, char* process_name){
                 strncpy(nombre_proceso, process_name, 11);  
                 fwrite(nombre_proceso, 1, 11, memory_file);
                 printf("Creando nuevo proceso %d con nombre '%s'\n", process_id, process_name);
-                break; 
+                return; 
 
             }
+            
+            fseek(memory_file, 256 - 2, SEEK_CUR);
         if (i == 32){
             printf("No hay espacio para crear un nuevo proceso.\n");
-
         }
         }
     }
@@ -591,7 +587,7 @@ void os_finish_process(int process_id) {
 
             printf("Proceso con ID %d terminado correctamente.\n", process_id);
             return;  // Salir de la función
-            
+
         } else {
             // Si no es el proceso correcto, saltamos al siguiente
             fseek(memory_file, 256 - 12, SEEK_CUR);
