@@ -8,11 +8,6 @@
 FILE* memory_file = NULL;
 
 
-typedef struct {
-    File* file_ptr;
-    char* file_nombre;
-    char mode;
-} osrmsFile;
 
 
 
@@ -210,68 +205,120 @@ void os_ls_files(int process_id) {
 
 
 
-
-//Esto esta malo, no entiendo como acceder a los archivos, luego de encontrar el process id
-osrmsFile* os_open(int process_id, char* file_nombre, char mode) {
+osrmsFile* os_open(int process_id, char* file_name, char mode) {
+    // Volver al inicio de la tabla de PCBs
     fseek(memory_file, 0, SEEK_SET);
-
-    for(int i = 0; i < 32; i++){
+    
+    // Buscar el proceso por su process_id
+    for (int i = 0; i < 32; i++) {
         unsigned char estado;
         unsigned char pid;
-        char process_nombre[11];
-
+        char process_nombre[11];  // Leer el nombre del proceso correctamente
+        
+        // Leer el estado del proceso (1 byte)
         fread(&estado, 1, 1, memory_file);
 
+        // Leer el ID del proceso (1 byte)
         fread(&pid, 1, 1, memory_file);
 
+        // Leer el nombre del proceso (10 bytes)
         fread(process_nombre, 1, 10, memory_file);
-        process_nombre[10] = \0;
+        process_nombre[10] = '\0';  // Asegurar la terminación de cadena
 
-        if (pid == process_id){
-            //Modo lectura
-            if(mode == 'r'){
-                // El archivo no existe
-                if (!os_exists(process_id, file_nombre)) {
-                    printf("El archivo %s no existe para el proceso %d.\n", file_nombre, process_id);
-                    return NULL; 
+        // Si encontramos el proceso con el ID correcto
+        if (pid == process_id) {
+            printf("Archivos asociados al proceso %d:\n", process_id);
+
+            // Iterar sobre los 5 archivos en la tabla de archivos
+            for (int j = 0; j < 5; j++) {
+                unsigned char file_validity;
+                char file_nombre[15];  // Ajuste para leer el nombre de 14 bytes
+                unsigned int file_size = 0;
+                unsigned char size_bytes[4];
+
+                // Leer el byte de validez (1 byte)
+                fread(&file_validity, 1, 1, memory_file);
+
+                // Leer y descartar el primer byte del nombre (carácter problemático)
+                fseek(memory_file, 1, SEEK_CUR);
+
+                // Leer el nombre del archivo (13 bytes restantes)
+                fread(file_nombre, 1, 13, memory_file);
+                file_nombre[13] = '\0';  // Asegurar la terminación de cadena
+
+                // Leer el tamaño del archivo (4 bytes)
+                fread(size_bytes, 1, 4, memory_file);
+
+                // Reconstruir el tamaño del archivo en little-endian
+                file_size = (size_bytes[0]) | (size_bytes[1] << 8) | (size_bytes[2] << 16) | (size_bytes[3] << 24);
+
+                // Verificar si el nombre del archivo coincide con el que buscamos
+
+                
+                if (mode == 114 && strcmp(file_nombre, file_name) == 0) {
+                    osrmsFile* file = (osrmsFile*)malloc(sizeof(osrmsFile));
+                    file->process_id = process_id;
+                    strcpy(file->file_name, file_name);
+                    file->mode = 'r';
+                    file->size = file_size;
+                    file->file_offset = ftell(memory_file);  // Guardar la posición del archivo
+                    printf("Archivo '%s' (ID: %d) abierto en modo lectura.\n", file_name, process_id);
+                    return file;
                 }
-            }
-            //Si en lugar se abre en modo escritura
-            else if (mode == 'w'){
-                if (os_exists(process_id, file_nombre)){
-                    printf("El archivo %s ya existe para el proceso %d.\n", file_nombre, process_id);
-                    return NULL;
+
+                // Si el modo es 'w' y el archivo no es válido
+                if (mode == 119 && file_validity == 0x00) {
+                    // Crear el archivo sin modificar la memoria
+                    osrmsFile* file = (osrmsFile*)malloc(sizeof(osrmsFile));
+                    file->process_id = process_id;
+                    strcpy(file->file_name, file_name);
+                    file->mode = 'w';
+                    file->size = 0;  // Tamaño inicial es 0
+                    file->file_offset = ftell(memory_file);  // Guardar la posición del archivo, aunque no se modifica en memoria
+                    printf("Archivo '%s' (ID: %d) creado en modo escritura.\n", file_name, process_id);
+                    return file;
                 }
-            }
-            // Asignar memoria para el archivo
-            osrmsFile* file = (osrmsFile*)malloc(sizeof(osrmsFile));
-            if (file == NULL) {
-                printf("Error al asignar memoria para el archivo.\n");
-                return NULL;  // Error de asignación
+
+                // Saltar a la siguiente entrada de archivo
+                fseek(memory_file, 4, SEEK_CUR);  // Nos aseguramos de saltar la dirección virtual correctamente
             }
 
-
-            file->file_nombre = malloc(strlen(file_nombre) + 1);
-            if (file->file_nombre == NULL){
-                printf("Error al asignar memoria para el nombre del archivo.\n");
-                free(file);
-                return NULL;
+            if (mode == 114) {
+                printf("El archivo '%s' no existe para el proceso %d.\n", file_name, process_id);
+            } else if (mode == 119) {
+                printf("No se encontró un archivo inválido para crear un nuevo archivo para el proceso %d.\n", process_id);
             }
 
-            strcpy(file->file_nombre, file_nombre);
-            file->mode = mode;
-
-            return file;
+            return NULL;
         }
 
-        // Saltar al siguiente proceso (cada proceso ocupa 256 bytes)
+        // Saltar al siguiente proceso si no coincide el process_id
         fseek(memory_file, 256 - 12, SEEK_CUR);
     }
 
-    // Si llegamos aquí, el proceso no existe
     printf("El proceso con ID %d no existe.\n", process_id);
     return NULL;
 }
+
+
+
+
+void os_close(osrmsFile* file) {
+    // Verificar si el puntero es nulo
+    if (file == NULL) {
+        printf("Error: no se puede cerrar un archivo nulo.\n");
+        return;
+    }
+
+    // Asegurarse de que los datos del archivo estén bien antes de liberar
+    printf("Cerrando archivo '%s' (ID: %d)...\n", file->file_name, file->process_id);
+
+    // Liberar la memoria asignada al archivo
+    os_free_file(file);
+
+    printf("Archivo cerrado correctamente.\n");
+}
+
 
 
 
@@ -347,11 +394,10 @@ void listar_procesos_y_archivos() {
             file_nombre[14] = '\0';  // Terminamos la cadena con \0
 
             // Si la entrada del archivo es válida, imprimimos el nombre
-            if (file_validity == 0x01) {
-                printf("\tArchivo válido: %s\n", file_nombre);
-            } else {
-                printf("\tEntrada de archivo no válida\n");
-            }
+            
+            printf("\tArchivo válido: %s\n", file_nombre);
+            
+            
 
             // Saltar los 8 bytes restantes de la entrada del archivo (tamaño del archivo y dirección virtual)
             fseek(memory_file, 8, SEEK_CUR);
@@ -439,161 +485,261 @@ void os_tp_bitmap() {
     printf("Total de Tablas de Páginas libres: %d\n", tp_libres);
 }
 
-void os_start_process(int process_id, char* process_name){
-     fseek(memory_file, 0, SEEK_SET);
-
-    // Iteramos sobre los 32 procesos en la tabla de PCBs
+void os_start_process(int process_id, char* process_name) {
+    // Volver al inicio de la tabla de PCBs
+    fseek(memory_file, 0, SEEK_SET);
+    
+    // Iterar sobre las 32 entradas de la tabla de PCBs
     for (int i = 0; i < 32; i++) {
         unsigned char estado;
         unsigned char pid;
-        char process_nombre[12];
-
-        int encontrado = 0;
-
-        fread(&estado, 1, 1, memory_file);
-
-        // Leemos el ID del proceso (1 byte)
-        fread(&pid, 1, 1, memory_file);
-
-        // Leemos el nombre del proceso (11 bytes)
-        fread(process_nombre, 1, 11, memory_file);
-        process_nombre[11] = '\0';  // Aseguramos que la cadena esté terminada en '\0'
         
-
-        //Lei en una issue que se puede asumir que siempre que el proceso exista y se pida un start su estado será cero
-
-        //Entramos en un if en caso de encontrar el id del proceso en la tabla de PCBs
-        if (pid == process_id) {
-            encontrado = 1;
-            printf("Archivos asociados al proceso %d:\n", process_id);
-
-            //Movemos para poder escribir en el lugar donde se encuentra el estado
-            fseek(memory_file,-(12 + 1), SEEK_CUR);
-
-            printf("iniciando el proceso de id: %d\n", process_id);
-            estado = 0x01;
-            fwrite(&estado, 1, 1, memory_file);
-
-            break;
+        // Leer el estado del proceso (1 byte)
+        fread(&estado, 1, 1, memory_file);
+        
+        // Leer el ID del proceso (1 byte)
+        fread(&pid, 1, 1, memory_file);
+        
+        // Si el proceso está activo y coincide con el process_id, no podemos iniciar el proceso
+        if (estado == 0x01 && pid == process_id) {
+            printf("El proceso %d ya está en ejecución.\n", process_id);
+            return;
         }
 
-        fseek(memory_file, 256 - 12, SEEK_CUR);  // Saltamos los bytes restantes
-    }
-    //Ahora se debe analizar el caso en que no existe el proceso, por lo que no entra en
-    if (encontrado == 0){
-        //Regresamos el cursor al incio
-        fseek(memory_file, 0, SEEK_SET)
+        // Si encontramos una entrada inactiva, podemos iniciar el proceso aquí
+        if (estado == 0x00 ) {
+            // Volver al inicio de esta entrada
+            fseek(memory_file, -2, SEEK_CUR);
 
-        for (int i = 0; i < 32; i++){
-            unsigned char estado;
-            unsigned char pid;
-            // Leer el estado del proceso (1 byte)
-            fread(&estado, 1, 1, memory_file);
-            // Leer el ID del proceso (1 byte)
-            fread(&pid, 1, 1, memory_file);
-
-            //Asumiendo que el process id es 0 si el espacio está libre
-            if (pid == 0){
-
-                //Devolvemos el cursor
-                fseek(memory_file,-(2), SEEK_CUR);
-                
-                estado = 0x01;
-                fwrite(&estado, 1, 1, memory_file);
-
-                fwrite(&process_id, 1, 1, memory_file);
-
-                // Inicializamos el array con ceros
-                char nombre_proceso[11] = {0};
-
-                // Copiamos como máximo 11 caracteres
-                strncpy(nombre_proceso, process_name, 11);  
-                fwrite(nombre_proceso, 1, 11, memory_file);
-                printf("Creando nuevo proceso %d con nombre '%s'\n", process_id, process_name);
-                return; 
-
-            }
+            // Escribir el nuevo estado (activo) y el ID del proceso
+            unsigned char estado_activo = 0x01;
+            unsigned char pid_asignado = (unsigned char)process_id;  // Asegurarse de que el ID se convierte correctamente a un byte
             
-            fseek(memory_file, 256 - 2, SEEK_CUR);
-        if (i == 32){
-            printf("No hay espacio para crear un nuevo proceso.\n");
+            // Escribir el estado y el process_id en la memoria
+            fwrite(&estado_activo, 1, 1, memory_file);
+            fwrite(&pid_asignado, 1, 1, memory_file);
+
+            // Escribir el nombre del proceso (10 bytes)
+            char process_name_padded[11] = {0};
+            strncpy(process_name_padded, process_name, 10);
+            fwrite(process_name_padded, 1, 10, memory_file);
+
+            // Saltar el resto de la entrada del PCB
+            fseek(memory_file, 256 - 12, SEEK_CUR);
+
+            printf("Proceso %d (%s) iniciado correctamente.\n", process_id, process_name);
+            return;
         }
-        }
+        
+        // Saltar al siguiente proceso en la tabla de PCBs
+        fseek(memory_file, 256 - 2, SEEK_CUR);
     }
+    
+    printf("No hay espacio disponible para iniciar un nuevo proceso.\n");
 }
 
+
+
 void os_finish_process(int process_id) {
-    // Vamos al inicio del archivo
+    // Volver al inicio de la tabla de PCBs
     fseek(memory_file, 0, SEEK_SET);
 
     // Iterar sobre las 32 entradas de la tabla de PCBs
     for (int i = 0; i < 32; i++) {
         unsigned char estado;
         unsigned char pid;
-        char process_nombre[11];
-
+        
         // Leer el estado del proceso (1 byte)
         fread(&estado, 1, 1, memory_file);
-
+        
         // Leer el ID del proceso (1 byte)
         fread(&pid, 1, 1, memory_file);
 
-        // Leer el nombre del proceso (10 bytes)
-        fread(process_nombre, 1, 10, memory_file);
-        process_nombre[10] = '\0';  // Asegurar la terminación de cadena
+        // Si encontramos el proceso con el ID correcto
+        if (estado == 0x01 && pid == process_id) {
+            // Volver al inicio de esta entrada
+            fseek(memory_file, -2, SEEK_CUR);
 
-        // Si encontramos el proceso con el ID correcto y su estado es en ejecución
-        if (pid == process_id && estado == 0x01) {
-            // (cambiamos el estado a 0x00)
-            unsigned char nuevo_estado = 0x00;
-            fseek(memory_file, -12, SEEK_CUR);  // Volver un bytes atras
-            fwrite(&nuevo_estado, 1, 1, memory_file);  // Escribir el nuevo estado
+            // Marcar el proceso como inactivo (estado 0x00)
+            unsigned char estado_inactivo = 0x00;
+            fwrite(&estado_inactivo, 1, 1, memory_file);
 
+            // Limpiar el resto de la entrada (opcional, solo se requiere poner el estado en 0)
+            fseek(memory_file, 256 - 2, SEEK_CUR);
 
-
-
-
-            //Agregue esto para mover hacia adelante y que el proximo a leer sea el file validity
-            fread(&pid, 1, 1, memory_file);
-            // Leer el nombre del proceso (10 bytes)
-            fread(process_nombre, 1, 10, memory_file);
-            process_nombre[10] = '\0';  // Asegurar la terminación de cadena
-
-
-
-
-
-
-            // Liberar los archivos asociados al proceso
-            for (int j = 0; j < 5; j++) {
-                unsigned char file_validity;
-                char file_nombre[15];
-
-                // Leer el byte de validez (1 byte)
-                fread(&file_validity, 1, 1, memory_file);
-
-                // Si el archivo es válido, liberamos su espacio
-                if (file_validity == 0x01) {
-                    // Si se requiere, actualizar el estado de validez del archivo a no válido
-                    fseek(memory_file, -1, SEEK_CUR);  // Volver un byte atrás para escribir
-                    unsigned char invalido = 0x00;  // Estado inválido
-                    fwrite(&invalido, 1, 1, memory_file);  // Marcar como no válido
-                }
-
-                // Saltar el resto de la entrada de archivo
-                //creo que este salto está mal hecho, no cache muy bien cuanto hay que saltar
-                fseek(memory_file, 8, SEEK_CUR);  // Saltar a la siguiente entrada de archivo
-            }
-
-            printf("Proceso con ID %d terminado correctamente.\n", process_id);
-            return;  // Salir de la función
-
-        } else {
-            // Si no es el proceso correcto, saltamos al siguiente
-            fseek(memory_file, 256 - 12, SEEK_CUR);
+            printf("Proceso %d terminado correctamente.\n", process_id);
+            return;
         }
+        
+        // Saltar al siguiente proceso en la tabla de PCBs
+        fseek(memory_file, 256 - 2, SEEK_CUR);
     }
 
-    // Si llegamos aquí, el proceso no estaba activo o no se encontró
-    printf("No se encontró un proceso activo con ID %d.\n", process_id);
+    printf("El proceso %d no está en ejecución.\n", process_id);
+}
+
+
+void os_free_file(osrmsFile* file) {
+    printf("a/n");
+    if (file != NULL) {
+        printf("Liberando memoria para archivo '%s' (ID: %d)...\n", file->file_name, file->process_id);
+
+        // Asegurarse de que el archivo sea válido antes de liberarlo
+        free(file);  // Liberar la memoria del archivo
+        printf("Memoria liberada correctamente.\n");
+    } else {
+        printf("Error: no se puede liberar un archivo nulo.\n");
+    }
+}
+
+int os_read_file(osrmsFile* file_desc, char* dest) {
+    if (file_desc == NULL) {
+        printf("Error: el descriptor de archivo es nulo.\n");
+        return -1;
+    }
+
+    FILE* dest_file = fopen(dest, "wb");
+    if (dest_file == NULL) {
+        printf("Error al abrir el archivo de destino %s.\n", dest);
+        return -1;
+    }
+
+    // Empezamos a leer desde la dirección virtual asociada al archivo
+    unsigned int virtual_addr = file_desc->file_offset;
+    unsigned int remaining_bytes = file_desc->size;
+    unsigned int bytes_read = 0;
+
+    // Bucle para leer cada página del archivo
+    while (remaining_bytes > 0) {
+        // Obtener VPN (Virtual Page Number) y el offset dentro de la página
+        unsigned int vpn = virtual_addr >> 15;  // Los primeros 6 bits para la tabla de primer orden
+        unsigned int offset = virtual_addr & 0x7FFF;  // Los últimos 15 bits son el offset dentro de la página
+
+        // 1. Leer la tabla de primer orden para obtener la tabla de segundo orden
+        fseek(memory_file, 32 * 256 + vpn * 2, SEEK_SET);  // Tabla de primer orden comienza después de los PCBs
+        unsigned short second_order_table;
+        fread(&second_order_table, sizeof(unsigned short), 1, memory_file);
+
+        if (second_order_table == 0) {  // Verificamos si es una tabla válida
+            printf("Error: la tabla de segundo orden no es válida para VPN %u.\n", vpn);
+            fclose(dest_file);
+            return -1;
+        }
+
+        // 2. Leer la tabla de segundo orden para obtener el PFN (Physical Frame Number)
+        unsigned int second_order_index = (virtual_addr >> 9) & 0x3F;  // Los siguientes 6 bits para la tabla de segundo orden
+        fseek(memory_file, (128 * 1024) + second_order_table * 128 + second_order_index * 2, SEEK_SET);  // Tablas de segundo orden
+        unsigned short pfn;
+        fread(&pfn, sizeof(unsigned short), 1, memory_file);
+
+        if (pfn == 0) {  // Verificamos si el PFN es válido
+            printf("Error: PFN no válido para VPN %u.\n", vpn);
+            fclose(dest_file);
+            return -1;
+        }
+
+        // 3. Calcular la dirección física usando el PFN y el offset
+        unsigned int physical_addr = (pfn << 15) | offset;
+
+        // Leer los datos desde la dirección física
+        fseek(memory_file, physical_addr, SEEK_SET);
+
+        // Leer la cantidad correcta de bytes desde la página actual
+        unsigned int bytes_to_read = (remaining_bytes > (32 * 1024 - offset)) ? (32 * 1024 - offset) : remaining_bytes;
+        unsigned char buffer[bytes_to_read];
+
+        fread(buffer, 1, bytes_to_read, memory_file);
+        fwrite(buffer, 1, bytes_to_read, dest_file);
+
+        // Actualizamos el contador de bytes leídos
+        remaining_bytes -= bytes_to_read;
+        virtual_addr += bytes_to_read;
+        bytes_read += bytes_to_read;
+    }
+
+    fclose(dest_file);
+    printf("Lectura completada. %u bytes leídos desde el archivo.\n", bytes_read);
+    return bytes_read;
+}
+
+int os_write_file(osrmsFile* file_desc, char* src) {
+    if (file_desc == NULL) {
+        printf("Error: el descriptor de archivo es nulo.\n");
+        return -1;
+    }
+
+    // Abrir el archivo fuente desde el sistema local
+    FILE* src_file = fopen(src, "rb");
+    if (src_file == NULL) {
+        printf("Error al abrir el archivo de origen %s.\n", src);
+        return -1;
+    }
+
+    // Obtener el tamaño del archivo fuente
+    fseek(src_file, 0, SEEK_END);
+    unsigned int src_size = ftell(src_file);
+    fseek(src_file, 0, SEEK_SET);
+
+    // Empezar a escribir en la memoria desde la posición del archivo en memoria
+    unsigned int virtual_addr = file_desc->file_offset;
+    unsigned int remaining_bytes = src_size;
+    unsigned int bytes_written = 0;
+
+    // Bucle para escribir el archivo, manejando la lógica de escritura página a página
+    while (remaining_bytes > 0) {
+        // Obtener VPN (Virtual Page Number) y el offset dentro de la página
+        unsigned int vpn = virtual_addr >> 15;  // Los primeros 6 bits para la tabla de primer orden
+        unsigned int offset = virtual_addr & 0x7FFF;  // Los últimos 15 bits son el offset dentro de la página
+
+        // 1. Leer la tabla de primer orden para obtener la tabla de segundo orden
+        fseek(memory_file, 32 * 256 + vpn * 2, SEEK_SET);  // Tabla de primer orden comienza después de los PCBs
+        unsigned short second_order_table;
+        fread(&second_order_table, sizeof(unsigned short), 1, memory_file);
+
+        if (second_order_table == 0) {  // Verificamos si es una tabla válida
+            printf("Error: no hay una tabla de segundo orden válida para VPN %u.\n", vpn);
+            fclose(src_file);
+            return -1;
+        }
+
+        // 2. Leer la tabla de segundo orden para obtener el PFN (Physical Frame Number)
+        unsigned int second_order_index = (virtual_addr >> 9) & 0x3F;  // Los siguientes 6 bits para la tabla de segundo orden
+        fseek(memory_file, (128 * 1024) + second_order_table * 128 + second_order_index * 2, SEEK_SET);  // Tablas de segundo orden
+        unsigned short pfn;
+        fread(&pfn, sizeof(unsigned short), 1, memory_file);
+
+        if (pfn == 0) {  // Verificamos si el PFN es válido
+            printf("Error: no hay un PFN válido para VPN %u.\n", vpn);
+            fclose(src_file);
+            return -1;
+        }
+
+        // 3. Calcular la dirección física usando el PFN y el offset
+        unsigned int physical_addr = (pfn << 15) | offset;
+
+        // Mover el puntero de escritura a la dirección física calculada
+        fseek(memory_file, physical_addr, SEEK_SET);
+
+        // Leer los datos desde el archivo fuente
+        unsigned int bytes_to_write = (remaining_bytes > (32 * 1024 - offset)) ? (32 * 1024 - offset) : remaining_bytes;
+        unsigned char buffer[bytes_to_write];
+        fread(buffer, 1, bytes_to_write, src_file);
+
+        // Escribir los datos en la memoria virtual
+        fwrite(buffer, 1, bytes_to_write, memory_file);
+
+        // Actualizar el contador de bytes escritos
+        remaining_bytes -= bytes_to_write;
+        virtual_addr += bytes_to_write;
+        bytes_written += bytes_to_write;
+    }
+
+    // Cerrar el archivo fuente
+    fclose(src_file);
+
+    // Actualizar el tamaño del archivo en la estructura del descriptor
+    file_desc->size = src_size;
+
+    printf("Escritura completada. %u bytes escritos en el archivo.\n", bytes_written);
+    return bytes_written;
 }
